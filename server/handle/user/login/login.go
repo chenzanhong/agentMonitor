@@ -3,23 +3,19 @@ package login
 import (
 	"cmd/server/middlewire"
 	"database/sql"
+	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"time"
 
 	"github.com/dgrijalva/jwt-go"
 	"github.com/gin-gonic/gin"
 	_ "github.com/lib/pq"
-)
+	"gorm.io/gorm"
 
-type User struct {
-	ID         int
-	Name       string
-	Email      string
-	Password   string
-	IsVerified bool
-}
+	m_init "cmd/server/model/init"
+	u "cmd/server/model/user"
+)
 
 // 初始化数据库并创建用户表
 func InitDB() (*sql.DB, error) {
@@ -39,11 +35,6 @@ func InitDB() (*sql.DB, error) {
 
 // 注册
 func Register(c *gin.Context) {
-	db, err := InitDB()
-	if err != nil {
-		log.Fatalf("数据库连接错误: %v", err)
-	}
-
 	// 定义用于接收 JSON 数据的结构体
 	var input struct {
 		Name     string `json:"name"`
@@ -64,14 +55,26 @@ func Register(c *gin.Context) {
 	}
 
 	// 检查邮箱是否存在
-	var user User
-	err = db.QueryRow("SELECT id FROM users WHERE email = $1", input.Email).Scan(&user.ID)
+	var user u.User
+	err := m_init.DB.Where("email = ?", input.Email).First(&user).Error
 	if err == nil {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"message": "用户已存在"})
 		return
+	}else if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		// 如果 err 不为 nil 且不是因为记录未找到导致的，则是其他数据库错误
+		c.JSON(http.StatusInternalServerError, gin.H{"message": "数据库查询失败"})
+		return
 	}
+
 	// 创建用户
-	_, err = db.Exec("INSERT INTO users (name, email, password, is_verified) VALUES ($1, $2, $3, $4)", input.Name, input.Email, input.Password, true)
+	newUser := u.User{
+        Name:       input.Name,
+        Email:      input.Email,
+        Password:   input.Password,
+        IsVerified: true,
+    }
+
+	err = m_init.DB.Create(&newUser).Error;
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"message": "用户创建失败"})
 		return
@@ -85,12 +88,6 @@ func Register(c *gin.Context) {
 
 // 登录
 func Login(c *gin.Context) {
-	db, err := InitDB()
-	if err != nil {
-		log.Fatalf("数据库连接错误: %v", err)
-	}
-	defer db.Close()
-
 	// 定义用于接收 JSON 数据的结构体
 	var input struct {
 		Name     string `json:"name"`
@@ -104,8 +101,8 @@ func Login(c *gin.Context) {
 	}
 
 	// 查找用户
-	var user User
-	err = db.QueryRow("SELECT id, password FROM users WHERE name = $1", input.Name).Scan(&user.ID, &user.Password)
+	var user u.User
+	err := m_init.DB.Where("name = ?", input.Name).First(&user).Error;
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"message": "用户不存在"})
 		return
@@ -116,6 +113,7 @@ func Login(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"message": "密码错误"})
 		return
 	}
+
 	// 生成 JWT
 	expirationTime := time.Now().Add(24 * time.Hour)
 	claims := &middlewire.Claims{
@@ -131,6 +129,7 @@ func Login(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"message": "生成 token 错误"})
 		return
 	}
+
 	// 登录成功
 	c.JSON(http.StatusOK, gin.H{
 		"message": "登录成功",
